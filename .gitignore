@@ -1,0 +1,25 @@
+# Data and model files (too large for git; live on Kaggle / HF Hub)
+data/
+checkpoints/
+*.wav
+*.flac
+*.mp3
+*.tar.gz
+
+# Secrets — never commit
+kaggle.json
+.env
+*.token
+
+# Python / OS
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+
+# Others
+PLAN.md
+*.pdf
+report/
+# Kaggle push bundles
+notebooks/*/build/

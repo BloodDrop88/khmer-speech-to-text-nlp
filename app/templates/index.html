@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="km">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Khmer Live Captions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+Khmer:wght@400;600&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1b1f24; --muted: #5f6b7a; --border: #e2e6eb;
+    --accent: #2457d6; --accent-text: #ffffff; --live: #d33a2c; --latest: #eef3ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111418; --panel: #1a1f25; --text: #e8ecf1; --muted: #9aa6b4; --border: #2b323b;
+            --accent: #5b8cff; --accent-text: #0b1020; --live: #ff6b5e; --latest: #1f2a40; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font-family: "Inter", "Noto Sans Khmer", system-ui, sans-serif; }
+  header { padding: 20px 24px 8px; }
+  h1 { margin: 0; font-size: 22px; }
+  .meta { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 24px; align-items: center; }
+  button { font: inherit; font-size: 14px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+           border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  .rec { display: none; align-items: center; gap: 6px; color: var(--live); font-size: 14px; font-weight: 600; }
+  .rec.on { display: inline-flex; }
+  .rec::before { content: ""; width: 10px; height: 10px; border-radius: 50%; background: var(--live);
+                 animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  main { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; padding: 8px 24px 24px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; padding: 8px 16px 16px; }
+                              .controls, header { padding-left: 16px; padding-right: 16px; } }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px;
+            min-height: 240px; display: flex; flex-direction: column; }
+  h2 { margin: 0 0 10px; font-size: 15px; color: var(--muted); font-weight: 600; }
+  #captions { flex: 1; overflow-y: auto; max-height: 60vh; font-family: "Noto Sans Khmer", sans-serif;
+              font-size: 22px; line-height: 1.9; }
+  #captions span { padding: 2px 4px; border-radius: 4px; }
+  #captions span.latest { background: var(--latest); }
+  #summary { font-family: "Noto Sans Khmer", sans-serif; font-size: 18px; line-height: 1.8; flex: 1; }
+  .empty { color: var(--muted); font-size: 15px; font-family: "Inter", sans-serif; }
+  .footer { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  #error { color: var(--live); font-size: 13px; padding: 0 24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Khmer Live Captioning &amp; Summarization</h1>
+  <div class="meta">ASR: {{ asr_model }} · Summarizer: {{ sum_model }} · Device: {{ device }}</div>
+</header>
+
+<div class="controls">
+  <button id="start" class="primary">Start microphone</button>
+  <button id="stop" disabled>Stop</button>
+  <button id="summarize">Summarize now</button>
+  <button id="clear">Clear</button>
+  <span id="rec" class="rec">Listening</span>
+  <span id="sent" class="meta"></span>
+</div>
+<div id="error"></div>
+
+<main>
+  <section>
+    <h2>Live captions</h2>
+    <div id="captions"><span class="empty">Press “Start microphone” and speak Khmer.</span></div>
+    <div class="footer" id="stats">—</div>
+  </section>
+  <section>
+    <h2>Summary</h2>
+    <div id="summary"><span class="empty">The summary updates about every 30 seconds.</span></div>
+    <div class="footer" id="sumstats">—</div>
+  </section>
+</main>
+
+<script>
+  const CHUNK_SECONDS = 3;
+  const socket = io();
+  const $ = (id) => document.getElementById(id);
+  let ctx, stream, node, buf = [], bufLen = 0, sent = 0;
+
+  async function start() {
+    $("error").textContent = "";
+    // Create and resume the AudioContext inside the click, before any await:
+    // Safari leaves a context created after `await getUserMedia` suspended, so no audio flows.
+    ctx = new AudioContext();
+    const resumed = ctx.resume();
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+    } catch (e) { $("error").textContent = "Microphone access failed: " + e.message; ctx.close(); return; }
+    await resumed;
+    sent = 0;
+    const src = ctx.createMediaStreamSource(stream);
+    node = ctx.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = (e) => {
+      const d = e.inputBuffer.getChannelData(0);
+      buf.push(new Float32Array(d)); bufLen += d.length;
+      if (bufLen >= ctx.sampleRate * CHUNK_SECONDS) flush();
+    };
+    src.connect(node); node.connect(ctx.destination);
+    $("start").disabled = true; $("stop").disabled = false; $("rec").classList.add("on");
+  }
+
+  function flush() {
+    if (!bufLen) return;
+    const all = new Float32Array(bufLen); let o = 0;
+    for (const b of buf) { all.set(b, o); o += b.length; }
+    buf = []; bufLen = 0;
+    const pcm = new Int16Array(all.length);
+    for (let i = 0; i < all.length; i++) pcm[i] = Math.max(-1, Math.min(1, all[i])) * 32767;
+    socket.emit("audio_chunk", { sr: ctx.sampleRate, pcm: pcm.buffer });
+    sent += 1;
+    $("sent").textContent = `${sent} chunks sent · ${socket.connected ? "connected" : "NOT connected to server"}`;
+  }
+
+  function stop() {
+    if (node) { flush(); node.disconnect(); }
+    if (stream) stream.getTracks().forEach((t) => t.stop());
+    if (ctx) ctx.close();
+    $("start").disabled = false; $("stop").disabled = true; $("rec").classList.remove("on");
+  }
+
+  $("start").onclick = start;
+  $("stop").onclick = stop;
+  $("summarize").onclick = () => socket.emit("summarize_now");
+  $("clear").onclick = () => socket.emit("clear");
+
+  socket.on("caption", (m) => {
+    $("stats").textContent = `last chunk ${m.audio_s}s → ${m.latency}s to transcribe · ${m.queued} waiting`;
+    if (!m.text) return;
+    const box = $("captions");
+    box.querySelector(".empty")?.remove();
+    box.querySelector(".latest")?.classList.remove("latest");
+    const s = document.createElement("span");
+    s.className = "latest"; s.textContent = m.text + " ";
+    box.appendChild(s); box.scrollTop = box.scrollHeight;
+  });
+  socket.on("summary_started", () => { $("sumstats").textContent = "summarizing…"; });
+  socket.on("summary", (m) => {
+    $("summary").textContent = m.text || "(empty summary)";
+    $("sumstats").textContent = `updated ${m.at} · took ${m.seconds}s`;
+  });
+  socket.on("cleared", () => {
+    $("captions").innerHTML = '<span class="empty">Cleared.</span>';
+    $("summary").innerHTML = '<span class="empty">The summary updates about every 30 seconds.</span>';
+    $("stats").textContent = "—"; $("sumstats").textContent = "—";
+  });
+  socket.on("status", (m) => { if (m.error) $("error").textContent = m.error; });
+</script>
+</body>
+</html>

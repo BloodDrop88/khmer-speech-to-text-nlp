@@ -1,0 +1,3 @@
+model,test_set,n,cer,cer_male,cer_female
+openai/whisper-small,fleurs_test,718,1.2548,,
+seanghay/whisper-small-khmer-v2,fleurs_test,718,0.2569,,
